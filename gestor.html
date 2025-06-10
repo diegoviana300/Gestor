@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Organizador de Solicitações Sincronizado</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .task-list-item input:checked + span { text-decoration: line-through; color: #9ca3af; }
+        .card:hover .card-actions, .task-list-item:hover .task-actions, .column-header:hover .column-actions { opacity: 1; }
+        #modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0, 0, 0, 0.5); display: none; justify-content: center; align-items: center; z-index: 10000; }
+        #modal { background: white; padding: 24px; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.1); width: 90%; max-width: 400px; }
+        .action-btn { background: none; border: none; cursor: pointer; padding: 2px; border-radius: 4px; }
+        .action-btn:hover { background-color: #e5e7eb; }
+        main { display: flex; flex-wrap: nowrap; gap: 1.5rem; overflow-x: auto; padding-bottom: 1.5rem; }
+        .column { flex: 0 0 320px; max-width: 320px; }
+        #loading-spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3b82f6;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-800">
+
+    <div id="modal-overlay">
+        <div id="modal">
+            <h3 id="modal-title" class="text-xl font-bold mb-4"></h3>
+            <p id="modal-text" class="mb-4"></p>
+            <input type="text" id="modal-input" class="w-full border-gray-300 rounded-md shadow-sm mb-4" placeholder="Digite aqui...">
+            <div class="flex justify-end space-x-3">
+                <button id="modal-cancel-btn" class="px-4 py-2 bg-gray-200 text-gray-800 rounded-md hover:bg-gray-300">Cancelar</button>
+                <button id="modal-confirm-btn" class="px-4 py-2 bg-blue-500 text-white rounded-md hover:bg-blue-600">Confirmar</button>
+            </div>
+        </div>
+    </div>
+    
+    <div id="auth-screen" class="h-screen w-screen flex flex-col justify-center items-center bg-gray-100 p-4 text-center">
+        <div id="loading-spinner" class="hidden mb-4"></div>
+        <div id="login-content">
+            <h1 class="text-4xl font-bold text-gray-800 mb-4">Organizador de Solicitações</h1>
+            <p class="text-gray-600 mb-8">Faça login para acessar seus dados de qualquer lugar.</p>
+            <button id="login-btn" class="bg-white hover:bg-gray-200 text-gray-700 font-semibold py-2 px-4 border border-gray-300 rounded-lg shadow-sm flex items-center mx-auto">
+                <img src="https://www.google.com/favicon.ico" alt="Google icon" class="w-6 h-6 mr-3"/>
+                Login com Google
+            </button>
+        </div>
+    </div>
+
+    <div id="app-screen" class="hidden">
+         <div class="container mx-auto p-4 md:p-8">
+            <header class="flex flex-col md:flex-row justify-between items-center mb-6 text-center md:text-left">
+                <div>
+                    <h1 class="text-3xl md:text-4xl font-bold text-gray-900">Painel de Controle</h1>
+                    <p id="user-info" class="text-gray-600 mt-1"></p>
+                </div>
+                <div class="flex items-center space-x-4 mt-4 md:mt-0">
+                     <button onclick="window.showAddColumnModal()" class="bg-indigo-500 hover:bg-indigo-600 text-white font-bold py-2 px-4 rounded-lg transition-colors duration-300 shadow">
+                        + Adicionar Coluna
+                    </button>
+                    <button id="logout-btn" class="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-4 rounded-lg">Sair</button>
+                </div>
+            </header>
+            <main id="board"></main>
+        </div>
+    </div>
+
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, onAuthStateChanged, GoogleAuthProvider, signInWithRedirect, signOut, getRedirectResult } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, doc, addDoc, getDoc, setDoc, deleteDoc, onSnapshot, query, serverTimestamp, updateDoc, writeBatch, getDocs, where } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- Configuração do Firebase ---
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : { apiKey: "DEMO_KEY", authDomain: "DEMO_DOMAIN", projectId: "DEMO_PROJECT_ID" };
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'final-task-board-redirect';
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+
+        // --- Variáveis Globais ---
+        let userId, columnsCollection, requestsCollection;
+        
+        // --- Elementos do DOM ---
+        const authScreen = document.getElementById('auth-screen');
+        const appScreen = document.getElementById('app-screen');
+        const loginBtn = document.getElementById('login-btn');
+        const logoutBtn = document.getElementById('logout-btn');
+        const userInfo = document.getElementById('user-info');
+        const loadingSpinner = document.getElementById('loading-spinner');
+        const loginContent = document.getElementById('login-content');
+        const modalOverlay = document.getElementById('modal-overlay'), modalTitle = document.getElementById('modal-title'), modalText = document.getElementById('modal-text'), modalInput = document.getElementById('modal-input'), modalConfirmBtn = document.getElementById('modal-confirm-btn'), modalCancelBtn = document.getElementById('modal-cancel-btn');
+        let onConfirmCallback = null;
+
+        // --- Funções do Modal ---
+        function showModal(config) {
+            modalTitle.textContent = config.title || '';
+            modalText.textContent = config.text || '';
+            modalInput.style.display = config.useInput ? 'block' : 'none';
+            modalInput.value = config.useInput ? (config.inputValue || '') : '';
+            modalConfirmBtn.onclick = () => { if (onConfirmCallback) { onConfirmCallback(config.useInput ? modalInput.value : true); } hideModal(); };
+            modalCancelBtn.onclick = hideModal;
+            onConfirmCallback = config.onConfirm;
+            modalOverlay.style.display = 'flex';
+            if (config.useInput) { modalInput.focus(); }
+        }
+        function hideModal() { modalOverlay.style.display = 'none'; onConfirmCallback = null; }
+
+        // --- Autenticação ---
+        const provider = new GoogleAuthProvider();
+        
+        // CORREÇÃO: Usar signInWithRedirect em vez de signInWithPopup
+        loginBtn.onclick = () => {
+            signInWithRedirect(auth, provider);
+        };
+        
+        logoutBtn.onclick = () => signOut(auth);
+
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                // Usuário está logado
+                userId = user.uid;
+                userInfo.textContent = `Logado como: ${user.displayName || user.email}`;
+                authScreen.classList.add('hidden');
+                appScreen.classList.remove('hidden');
+                
+                columnsCollection = collection(db, 'users', userId, 'boardColumns');
+                requestsCollection = collection(db, 'users', userId, 'requests');
+                
+                seedInitialDataIfNeeded();
+                listenForBoardChanges();
+            } else {
+                // Usuário está deslogado
+                authScreen.classList.remove('hidden');
+                appScreen.classList.add('hidden');
+                loginContent.classList.remove('hidden');
+                loadingSpinner.classList.add('hidden');
+            }
+        });
+
+        // Checa se o usuário está voltando do redirect do login
+        getRedirectResult(auth)
+            .then((result) => {
+                if (result) {
+                    // Se houver resultado, onAuthStateChanged já terá sido acionado.
+                    // Apenas mostramos um feedback visual.
+                    loginContent.classList.add('hidden');
+                    loadingSpinner.classList.remove('hidden');
+                }
+            }).catch((error) => {
+                console.error("Erro no redirecionamento de login:", error);
+                showModal({title: "Erro de Login", text: `Não foi possível completar o login. Código: ${error.code}`});
+            });
+
+        // --- Lógica da Aplicação (CRUD e Renderização) ---
+        async function seedInitialDataIfNeeded() {
+            if (!userId) return;
+            const snapshot = await getDocs(query(columnsCollection));
+            if (snapshot.empty) {
+                const batch = writeBatch(db);
+                const initialColumns = [
+                    { name: 'Apple', color: 'blue-600', createdAt: serverTimestamp() },
+                    { name: 'Google', color: 'green-600', createdAt: serverTimestamp() },
+                ];
+                initialColumns.forEach(col => batch.set(doc(columnsCollection), col));
+                
+                const initialData = [
+                    { title: '#5001867-63-2025.8.24', column: 'Apple', tasks: [{text: 'Já vieram os arquivos', completed: true}, {text: 'Enviado ofício para Indexar = OK', completed: true}] },
+                    { title: '#95813895', column: 'Google', tasks: [{text: 'VEIO Resposta do Google via E-mail', completed: true}, {text: 'Fazer NOVA solicitação no LERS', completed: true}] },
+                ];
+                initialData.forEach(req => batch.set(doc(requestsCollection), { ...req, createdAt: serverTimestamp() }));
+                await batch.commit();
+            }
+        }
+        
+        function listenForBoardChanges() {
+            if (!userId) return;
+            const qColumns = query(columnsCollection); 
+            onSnapshot(qColumns, (columnSnapshot) => {
+                const board = document.getElementById('board');
+                board.innerHTML = '';
+                const sortedColumns = columnSnapshot.docs.sort((a,b) => (a.data().createdAt?.seconds || 0) - (b.data().createdAt?.seconds || 0));
+                const columnColors = {};
+                sortedColumns.forEach(doc => { columnColors[doc.data().name] = doc.data().color; });
+
+                for (const columnDoc of sortedColumns) {
+                    const columnData = columnDoc.data();
+                    const columnEl = createColumnElement(columnDoc.id, columnData);
+                    board.appendChild(columnEl);
+                }
+
+                const qRequests = query(requestsCollection);
+                onSnapshot(qRequests, (requestSnapshot) => {
+                    document.querySelectorAll('.requests-container').forEach(c => c.innerHTML = '');
+                    for (const requestDoc of requestSnapshot.docs) {
+                        const requestData = requestDoc.data();
+                        const container = document.querySelector(`.requests-container[data-column-name="${requestData.column}"]`);
+                        if (container) {
+                            const color = columnColors[requestData.column] || 'gray-500';
+                            const cardEl = createCardElement(requestDoc.id, requestData, color);
+                            container.appendChild(cardEl);
+                        }
+                    }
+                });
+            }, (error) => {
+                console.error("Column Fetch Error:", error);
+                showModal({ title: "Erro de Dados", text: "Não foi possível carregar as colunas." });
+            });
+        }
+        
+        function createColumnElement(id, data) {
+            const section = document.createElement('section');
+            const sanitizedName = data.name.replace(/'/g, "&apos;").replace(/"/g, "&quot;");
+            section.className = `column bg-white rounded-xl shadow-md p-4`;
+            section.innerHTML = `
+                <div class="column-header flex items-center justify-between mb-4 group">
+                    <h2 class="text-2xl font-bold text-${data.color || 'gray-800'}">${data.name}</h2>
+                    <div class="column-actions opacity-0 transition-opacity flex items-center space-x-2">
+                        <button onclick="window.showEditColumnModal('${id}', '${sanitizedName}')" class="action-btn text-gray-500 hover:text-gray-800" title="Renomear Coluna"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.5L14.732 3.732z" /></svg></button>
+                        <button onclick="window.showDeleteColumnModal('${id}', '${sanitizedName}')" class="action-btn text-red-400 hover:text-red-600" title="Excluir Coluna"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg></button>
+                    </div>
+                </div>
+                <div class="requests-container space-y-4" data-column-name="${data.name}"></div>
+                <button onclick="window.showAddCardModal('${data.name}')" class="w-full mt-4 bg-gray-200 hover:bg-gray-300 text-gray-700 font-semibold py-2 px-4 rounded-lg transition-colors duration-300">+ Nova Solicitação</button>
+            `;
+            return section;
+        }
+
+        function createCardElement(id, data, color) {
+            const article = document.createElement('article');
+            article.className = 'card bg-gray-50 border border-gray-200 rounded-lg p-4 transition-shadow hover:shadow-lg';
+            const sanitizedTitle = data.title.replace(/'/g, "&apos;").replace(/"/g, "&quot;");
+            const colorName = color ? color.split('-')[0] : 'gray';
+
+            let tasksHtml = (data.tasks || []).map((task, index) => {
+                const sanitizedTaskText = task.text.replace(/'/g, "&apos;").replace(/"/g, "&quot;");
+                return `<li class="task-list-item flex items-center group" data-index="${index}">
+                    <input type="checkbox" onchange="window.toggleTaskStatus('${id}', ${index})" ${task.completed ? 'checked' : ''} class="h-4 w-4 rounded border-gray-300 text-${color || 'gray-600'} focus:ring-${colorName}-500">
+                    <span class="ml-3 text-gray-800 flex-grow">${task.text}</span>
+                    <div class="task-actions opacity-0 group-hover:opacity-100 transition-opacity flex items-center space-x-2">
+                         <button onclick="window.showEditTaskModal('${id}', ${index}, '${sanitizedTaskText}')" class="action-btn text-gray-500 hover:text-gray-800" title="Editar Tarefa"><svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.5L14.732 3.732z" /></svg></button>
+                         <button onclick="window.showDeleteTaskModal('${id}', ${index})" class="action-btn text-red-400 hover:text-red-600" title="Excluir Tarefa"><svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg></button>
+                    </div></li>`;
+            }).join('');
+
+            article.innerHTML = `<div class="flex justify-between items-start mb-3 group">
+                    <h3 class="font-semibold text-lg text-gray-700 flex-grow">${data.title}</h3>
+                    <div class="card-actions opacity-0 group-hover:opacity-100 transition-opacity flex items-center space-x-2 ml-2">
+                        <button onclick="window.showEditTitleModal('${id}', '${sanitizedTitle}')" class="action-btn text-gray-500 hover:text-gray-800" title="Editar Título"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.5L14.732 3.732z" /></svg></button>
+                        <button onclick="window.showDeleteCardModal('${id}')" class="action-btn text-red-400 hover:text-red-600" title="Excluir Solicitação"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg></button>
+                    </div></div>
+                <ul class="task-list space-y-2">${tasksHtml}</ul>
+                <div class="mt-4 flex">
+                    <input type="text" placeholder="Nova tarefa..." onkeypress="if(event.key === 'Enter') window.addTask('${id}', this)" class="add-task-input flex-grow text-sm border-gray-300 rounded-md shadow-sm">
+                    <button onclick="window.addTask('${id}', this.previousElementSibling)" class="ml-2 bg-gray-200 hover:bg-gray-300 text-gray-700 text-sm font-semibold py-1 px-3 rounded-md transition-colors">Adicionar</button>
+                </div>`;
+            return article;
+        }
+
+        // Funções de ação globais (CRUD)
+        window.showAddColumnModal = () => showModal({ title: "Nova Coluna", text: "Digite o nome da nova coluna:", useInput: true, onConfirm: async (name) => { if (name && name.trim()) { const colorPalette = ['purple-600', 'pink-600', 'indigo-600', 'red-600', 'yellow-600', 'teal-600']; const snapshot = await getDocs(query(columnsCollection)); const newColor = colorPalette[snapshot.size % colorPalette.length]; await addDoc(columnsCollection, { name: name.trim(), color: newColor, createdAt: serverTimestamp() }); } } });
+        window.showEditColumnModal = (id, name) => showModal({ title: "Renomear Coluna", text: "Digite o novo nome para a coluna:", useInput: true, inputValue: name, onConfirm: async (newName) => { if (newName && newName.trim() !== name) await updateDoc(doc(columnsCollection, id), { name: newName.trim() }); } });
+        window.showDeleteColumnModal = (id, name) => showModal({ title: "Excluir Coluna", text: `Tem certeza que deseja excluir a coluna "${name}" e todas as suas solicitações? Essa ação não pode ser desfeita.`, useInput: false, onConfirm: async () => { const q = query(requestsCollection, where("column", "==", name)); const reqsSnapshot = await getDocs(q); const batch = writeBatch(db); reqsSnapshot.forEach(doc => batch.delete(doc.ref)); batch.delete(doc(columnsCollection, id)); await batch.commit(); } });
+        window.showAddCardModal = (columnName) => showModal({ title: "Nova Solicitação", text: "Digite o título da nova solicitação:", useInput: true, onConfirm: async (title) => { if (title && title.trim()) await addDoc(requestsCollection, { title: title.trim(), column: columnName, tasks: [], createdAt: serverTimestamp() }); } });
+        window.showDeleteCardModal = (id) => showModal({ title: "Excluir Solicitação", text: "Tem certeza?", useInput: false, onConfirm: async () => await deleteDoc(doc(requestsCollection, id)) });
+        window.showEditTitleModal = (id, title) => showModal({ title: "Editar Título", text: "Digite o novo título:", useInput: true, inputValue: title, onConfirm: async (newTitle) => { if (newTitle && newTitle.trim() !== title) await updateDoc(doc(requestsCollection, id), { title: newTitle.trim() }); } });
+        window.showEditTaskModal = (id, index, text) => showModal({ title: "Editar Tarefa", text: "Edite o texto da tarefa:", useInput: true, inputValue: text, onConfirm: async (newText) => { if (newText && newText.trim() !== text) { const docRef = doc(requestsCollection, id); const docSnap = await getDoc(docRef); if(docSnap.exists()){ const tasks = [...docSnap.data().tasks]; if(tasks[index]) { tasks[index].text = newText.trim(); await updateDoc(docRef, { tasks }); } } } } });
+        window.showDeleteTaskModal = (id, index) => showModal({ title: "Excluir Tarefa", text: "Tem certeza?", useInput: false, onConfirm: async () => { const docRef = doc(requestsCollection, id); const docSnap = await getDoc(docRef); if(docSnap.exists()){ const tasks = docSnap.data().tasks.filter((_, i) => i !== index); await updateDoc(docRef, { tasks }); } } });
+        window.addTask = async (id, input) => { const text = input.value.trim(); if (text) { const docRef = doc(requestsCollection, id); const docSnap = await getDoc(docRef); if(docSnap.exists()){ const tasks = [...(docSnap.data().tasks || []), { text, completed: false }]; await updateDoc(docRef, { tasks }); input.value = ""; } } };
+        window.toggleTaskStatus = async (id, index) => { const docRef = doc(requestsCollection, id); const docSnap = await getDoc(docRef); if(docSnap.exists()){ const tasks = [...docSnap.data().tasks]; if(tasks[index]) { tasks[index].completed = !tasks[index].completed; await updateDoc(docRef, { tasks }); } } };
+
+    </script>
+</body>
+</html>
+
